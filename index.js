@@ -138,15 +138,17 @@ app.get('/screenshot', async (req, res) => {
     });
 
     // Wait additional time for dynamic content
-    await page.waitForTimeout(waitFor);
+    await new Promise(r => setTimeout(r, waitFor));
 
     // Try to scroll to trigger lazy load
     await page.evaluate(() => {
       window.scrollTo(0, document.body.scrollHeight);
     });
-    await page.waitForTimeout(1000);
-    window.scrollTo(0, 0);
-    await page.waitForTimeout(500);
+    await new Promise(r => setTimeout(r, 1000));
+    await page.evaluate(() => {
+      window.scrollTo(0, 0);
+    });
+    await new Promise(r => setTimeout(r, 500));
 
     // Take screenshot
     const screenshot = await page.screenshot({
@@ -172,7 +174,7 @@ app.get('/screenshot', async (req, res) => {
     try {
       if (page) {
         await page.goto(url, { waitUntil: 'load', timeout: 15000 });
-        await page.waitForTimeout(2000);
+        await new Promise(r => setTimeout(r, 2000));
         const screenshot = await page.screenshot({ type: 'jpeg', quality: 80 });
         res.set('Content-Type', 'image/jpeg');
         res.set('Cache-Control', 'public, max-age=3600');
@@ -226,7 +228,7 @@ app.get('/video', async (req, res) => {
     });
 
     // Wait for content to render
-    await page.waitForTimeout(waitFor);
+    await new Promise(r => setTimeout(r, waitFor));
 
     // Detect video elements
     const videoData = await page.evaluate(() => {
@@ -358,7 +360,7 @@ app.get('/api/video', async (req, res) => {
     // Forward to /video endpoint logic but extract just the video field
     const page = await createPage(req.query.userAgent);
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 25000 });
-    await page.waitForTimeout(parseInt(req.query.waitFor) || 5000);
+    await new Promise(r => setTimeout(r, parseInt(req.query.waitFor) || 5000));
 
     const videoUrl = await page.evaluate(() => {
       const v = document.querySelector('video[src]');
