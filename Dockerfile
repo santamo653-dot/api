@@ -22,7 +22,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install npm dependencies
-RUN npm install --only=production
+RUN npm install --omit=dev
 
 # Copy the rest of the application
 COPY . .
