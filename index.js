@@ -58,31 +58,77 @@ app.get('/screenshot', async (req, res) => {
     if (contentType.includes('text/html')) {
       const html = response.data.toString('utf-8');
       
-      // Try to extract the ad creative image from the HTML
-      const imgMatch = html.match(/<img[^>]+src=["']([^"']+\.(jpg|jpeg|png|gif|webp)[^"']*)["']/i);
-      const videoMatch = html.match(/<video[^>]+src=["']([^"']+)["']/i);
-      const metaImgMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+      // Try multiple strategies to get the full-size ad image
       
-      if (imgMatch || metaImgMatch) {
-        const imgUrl = (imgMatch || metaImgMatch)[1];
-        // Fetch the actual image
+      // Strategy 1: Look for high-res images in the HTML (not thumbnails)
+      // Facebook stores images in multiple sizes: /s220x220/, /s600x600/, /s720x720/, etc.
+      // We want the largest version: replace small sizes with larger ones
+      const allImgMatches = [...html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)];
+      const metaImgMatch2 = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+      
+      let bestImgUrl = null;
+      
+      // First try meta og:image
+      if (metaImgMatch2) {
+        let ogUrl = metaImgMatch2[1];
+        // Upgrade thumbnail to full size
+        ogUrl = ogUrl
+          .replace(/\/s\d+x\d+\//, '/s1080x1080/')  // Upgrade to 1080p
+          .replace(/[\/?&]oh=[^&]+/g, '')
+          .replace(/[\/?&]oe=[^&]+/g, '');
+        bestImgUrl = ogUrl;
+      }
+      
+      // Try to find a larger image from img tags
+      const fbCdnImages = allImgMatches
+        .map(m => m[1])
+        .filter(src => src.includes('fbcdn.net') || src.includes('cdninstagram.com'))
+        .map(src => src
+          .replace(/\/s\d+x\d+\//, '/s1080x1080/')
+          .replace(/[\/?&]oh=[^&]+/g, '')
+          .replace(/[\/?&]oe=[^&]+/g, '')
+          .replace(/[\/?&]s=\d+/g, '')
+        );
+      
+      // Pick the largest resolution we can find
+      const sizeOrder = ['s1080x1080', 's720x720', 's600x600', 's320x320', 's220x220'];
+      for (const size of sizeOrder) {
+        const found = fbCdnImages.find(url => url.includes(size));
+        if (found) {
+          bestImgUrl = found;
+          break;
+        }
+      }
+      
+      // If still no image, use the first fbcdn image we found
+      if (!bestImgUrl && fbCdnImages.length > 0) {
+        bestImgUrl = fbCdnImages[0];
+      }
+      
+      if (bestImgUrl) {
+        console.log('Fetching full-size image:', bestImgUrl.substring(0, 80));
         try {
-          const imgResponse = await axios.get(imgUrl, {
-            timeout: 10000,
+          const imgResponse = await axios.get(bestImgUrl, {
+            timeout: 15000,
             httpAgent,
             httpsAgent,
             responseType: 'arraybuffer',
             headers: {
-              'User-Agent': 'Mozilla/5.0',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
               'Referer': 'https://www.facebook.com/',
             },
+            maxRedirects: 5,
           });
+          
           res.set({
             'Content-Type': imgResponse.headers['content-type'] || 'image/jpeg',
             'Cache-Control': 'public, max-age=86400',
+            'Content-Length': imgResponse.data.length,
           });
           return res.send(imgResponse.data);
         } catch(e) {
+          console.log('Failed to fetch full-size image:', e.message);
           // Fall through to return HTML
         }
       }
