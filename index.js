@@ -151,7 +151,54 @@ app.get('/screenshot', async (req, res) => {
     page = await createPage();
     await navigateAndWait(page, url, parseInt(req.query.waitFor) || 8000);
 
-    const screenshot = await page.screenshot({ type: 'jpeg', quality: 80, fullPage: true });
+    // Try to find the actual ad content and clip to it
+    let clip = null;
+    try {
+      clip = await page.evaluate(() => {
+        // Try to find the main ad content container
+        const selectors = [
+          '#facebook', '#content', '#mainContent', 'main',
+          '[role="main"]', '.uiLayer', '.fbAd', '.adPreview',
+          'div[data-testid]', '#pages_msl_ad_preview',
+          // Facebook ad archive specific
+          '[data-pagelet="root"]', '#root',
+          // Generic: find the largest visible content area
+        ];
+        
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 200 && rect.height > 100) {
+              return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+            }
+          }
+        }
+
+        // Fallback: get the viewport dimensions of the actual content
+        const body = document.body;
+        const html = document.documentElement;
+        const maxHeight = Math.max(
+          body.scrollHeight, body.offsetHeight,
+          html.clientHeight, html.scrollHeight, html.offsetHeight
+        );
+        
+        // If page is very tall, clip to first 1200px (where ad content usually is)
+        if (maxHeight > 2000) {
+          return { x: 0, y: 0, width: Math.min(1920, html.clientWidth || 1366), height: Math.min(1200, maxHeight) };
+        }
+        
+        return null; // full page
+      });
+    } catch(e) { clip = null; }
+
+    const screenshot = await page.screenshot({
+      type: 'jpeg',
+      quality: 85,
+      clip: clip || undefined,
+      fullPage: !clip,
+    });
+
     res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400' });
     res.send(screenshot);
 
