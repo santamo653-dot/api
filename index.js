@@ -136,6 +136,99 @@ app.get('/api/video', async (req, res) => {
 });
 
 /* ══════════════════════════════════════════════════════════
+   ENDPOINT: GET /media
+   Returns both:
+     - `video`: detected video URL (if any)
+     - `images`: array of extracted image URLs (if any)
+   ══════════════════════════════════════════════════════════ */
+app.get('/media', async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.json({ data: { video: null, images: [] } });
+
+  try {
+    // Validate URL
+    try { new URL(url); } catch { return res.json({ data: { video: null, images: [] } }); }
+
+    const response = await axios.get(url, {
+      timeout: 20000,
+      httpAgent,
+      httpsAgent,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.7',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Referer': 'https://www.facebook.com/',
+      },
+      responseType: 'text',
+      maxRedirects: 5,
+    });
+
+    const html = response.data;
+
+    // ---- images (same strategy as /screenshot but return array) ----
+    const images = [];
+
+    // Strategy 1: og:image
+    const ogImgMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+    if (ogImgMatch?.[1]) {
+      images.push(ogImgMatch[1]);
+    }
+
+    // Strategy 2: fbcdn / cdninstagram images
+    const imgMatches = [...html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)];
+    const fbcdnImages = imgMatches
+      .map(m => m[1])
+      .filter(src => src.includes('fbcdn.net') || src.includes('cdninstagram.com'))
+      .filter(src => !src.includes('emoji') && !src.includes('icon'))
+      .map(src => {
+        // Upgrade thumbnail to full size
+        return src
+          .replace(/\/s\d+x\d+\//, '/s1080x1080/')
+          .replace(/[\/?&]oh=[^&]+/g, '')
+          .replace(/[\/?&]oe=[^&]+/g, '')
+          .replace(/[\/?&]s=\d+/g, '');
+      });
+
+    for (const u of fbcdnImages) {
+      if (images.length >= 5) break;
+      if (!images.includes(u)) images.push(u);
+    }
+
+    // Strategy 3: video poster
+    if (images.length === 0) {
+      const videoPosterMatch = html.match(/poster=["']([^"']+)["']/i);
+      if (videoPosterMatch?.[1]) images.push(videoPosterMatch[1]);
+    }
+
+    // ---- video (same patterns as /api/video) ----
+    const patterns = [
+      /"playable_url"\s*:\s*"([^"]+)"/,
+      /"browser_native_hd_url"\s*:\s*"([^"]+)"/,
+      /"browser_native_sd_url"\s*:\s*"([^"]+)"/,
+      /"hd_src"\s*:\s*"([^"]+)"/,
+      /"sd_src"\s*:\s*"([^"]+)"/,
+      /<meta[^>]+property=["']og:video["'][^>]+content=["']([^"']+)["']/i,
+      /"video_url"\s*:\s*"([^"]+)"/,
+    ];
+
+    let video = null;
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match) {
+        video = match[1].replace(/\\u003d/g, '=').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+        break;
+      }
+    }
+
+    return res.json({ data: { video, images } });
+
+  } catch (err) {
+    console.error('Media extraction error:', err.message);
+    return res.json({ data: { video: null, images: [] } });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════
    ENDPOINT: GET /health
    ══════════════════════════════════════════════════════════ */
 app.get('/health', (req, res) => {
