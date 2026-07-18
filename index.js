@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const axios = require('axios');
+const http = require('http');
+const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,213 +10,179 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-let browser = null;
-
-async function getBrowser() {
-  if (browser && browser.isConnected()) return browser;
-  
-  browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-      '--disable-gpu', '--disable-accelerated-2d-canvas', '--single-process',
-      '--no-first-run', '--disable-background-networking',
-      '--disable-background-timer-throttling', '--disable-breakpad',
-      '--disable-component-update', '--disable-default-apps',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-hang-monitor', '--disable-ipc-flooding-protection',
-      '--disable-popup-blocking', '--disable-renderer-backgrounding', '--disable-sync',
-      '--disable-blink-features=AutomationControlled',
-      '--window-size=375,812',  // iPhone viewport
-    ],
-    timeout: 60000,
-    ignoreHTTPSErrors: true,
-  });
-
-  browser.on('disconnected', () => { browser = null; });
-  return browser;
-}
-
-async function createPage() {
-  const br = await getBrowser();
-  const page = await br.newPage();
-  
-  // **MOBILE VIEWPORT** - Facebook ads are optimized for mobile
-  await page.setViewport({ 
-    width: 375, 
-    height: 812, 
-    deviceScaleFactor: 2,
-    isMobile: true,
-    hasTouch: true,
-  });
-  
-  // Realistic mobile user agent
-  await page.setUserAgent(
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
-  );
-
-  await page.setExtraHTTPHeaders({
-    'Accept-Language': 'fr-FR,fr;q=0.9',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  });
-
-  // Stealth mode
-  await page.evaluateOnNewDocument(() => {
-    const newProto = navigator.__proto__;
-    delete newProto.webdriver;
-    Object.defineProperty(newProto, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'plugins', { 
-      get: () => [1, 2, 3, 4, 5].map(i => ({ name: `Plugin ${i}`, filename: `plugin${i}.dll` }))
-    });
-    Object.defineProperty(navigator, 'languages', { get: () => ['fr-FR', 'fr', 'en-US', 'en'] });
-    window.chrome = { runtime: {} };
-  });
-
-  page.setDefaultNavigationTimeout(35000);
-  page.setDefaultTimeout(35000);
-
-  return page;
-}
-
-async function navigateAndWait(page, url, waitMs) {
-  console.log('Navigating to:', url.substring(0, 80) + '...');
-  
-  const strategies = [
-    { waitUntil: 'domcontentloaded', timeout: 20000 },
-    { waitUntil: 'networkidle2', timeout: 30000 },
-    { waitUntil: 'load', timeout: 20000 },
-  ];
-
-  for (const s of strategies) {
-    try {
-      await page.goto(url, s);
-      console.log('Navigation succeeded with:', s.waitUntil);
-      break;
-    } catch (e) {
-      console.log('Navigation failed with', s.waitUntil, ':', e.message.substring(0, 50));
-    }
-  }
-
-  console.log('Waiting', waitMs, 'ms for content...');
-  await new Promise(r => setTimeout(r, waitMs));
-
-  return true;
-}
+const httpAgent = new http.Agent({ keepAlive: true });
+const httpsAgent = new https.Agent({ keepAlive: true, rejectUnauthorized: false });
 
 /* ══════════════════════════════════════════════════════════
-   ENDPOINT: GET /screenshot — Mobile viewport screenshot
+   ENDPOINT: GET /screenshot
+   Returns the actual ad image from Facebook without Puppeteer.
+   Extracts og:image or fbcdn images from HTML.
    ══════════════════════════════════════════════════════════ */
 app.get('/screenshot', async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).json({ status: 'error', message: 'Missing url' });
   try { new URL(url); } catch { return res.status(400).json({ status: 'error', message: 'Invalid URL' }); }
 
-  let page = null;
   try {
-    page = await createPage();
-    await navigateAndWait(page, url, parseInt(req.query.waitFor) || 8000);
-
-    // Screenshot at mobile viewport - this will show the ad as it appears on phone
-    const screenshot = await page.screenshot({ 
-      type: 'jpeg', 
-      quality: 85,
-      fullPage: false,  // Just the viewport
+    // Fetch the ad page HTML from Facebook
+    const response = await axios.get(url, {
+      timeout: 20000,
+      httpAgent,
+      httpsAgent,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Referer': 'https://www.facebook.com/',
+      },
+      responseType: 'text',
+      maxRedirects: 5,
     });
 
-    res.set({ 
-      'Content-Type': 'image/jpeg', 
-      'Cache-Control': 'public, max-age=86400',
-      'Content-Length': screenshot.length,
-    });
-    res.send(screenshot);
+    const html = response.data;
+
+    // Strategy 1: Extract og:image
+    const ogImgMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+    if (ogImgMatch) {
+      const imgUrl = ogImgMatch[1];
+      console.log('Found og:image:', imgUrl.substring(0, 80));
+      return await serveImage(res, imgUrl);
+    }
+
+    // Strategy 2: Find fbcdn images in HTML
+    const imgMatches = [...html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)];
+    const fbcdnImages = imgMatches
+      .map(m => m[1])
+      .filter(src => src.includes('fbcdn.net') || src.includes('cdninstagram.com'))
+      .filter(src => !src.includes('emoji') && !src.includes('icon'))
+      .map(src => {
+        // Upgrade thumbnail to full size
+        return src
+          .replace(/\/s\d+x\d+\//, '/s1080x1080/')
+          .replace(/[\/?&]oh=[^&]+/g, '')
+          .replace(/[\/?&]oe=[^&]+/g, '')
+          .replace(/[\/?&]s=\d+/g, '');
+      });
+
+    if (fbcdnImages.length > 0) {
+      console.log('Found fbcdn image:', fbcdnImages[0].substring(0, 80));
+      return await serveImage(res, fbcdnImages[0]);
+    }
+
+    // Strategy 3: Look for video poster
+    const videoPosterMatch = html.match(/poster=["']([^"']+)["']/i);
+    if (videoPosterMatch) {
+      console.log('Found video poster:', videoPosterMatch[1].substring(0, 80));
+      return await serveImage(res, videoPosterMatch[1]);
+    }
+
+    // No image found - return empty response
+    console.log('No image found in ad HTML');
+    res.status(404).json({ status: 'error', message: 'No image found' });
 
   } catch (err) {
     console.error('Screenshot error:', err.message);
-    res.status(502).json({ status: 'error', message: 'Screenshot failed: ' + err.message });
-  } finally {
-    if (page) await page.close().catch(() => {});
+    res.status(502).json({ status: 'error', message: 'Failed: ' + err.message });
   }
 });
 
 /* ══════════════════════════════════════════════════════════
-   ENDPOINT: GET /api/video — Get video URL from Facebook ad
+   ENDPOINT: GET /api/video
    ══════════════════════════════════════════════════════════ */
 app.get('/api/video', async (req, res) => {
   const url = req.query.url;
   if (!url) return res.json({ video: null });
 
-  let page = null;
   try {
-    page = await createPage();
-    const videoUrls = new Set();
+    const response = await axios.get(url, {
+      timeout: 20000,
+      httpAgent,
+      httpsAgent,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept-Language': 'fr-FR,fr;q=0.9',
+        'Referer': 'https://www.facebook.com/',
+      },
+      responseType: 'text',
+    });
 
-    await page.setRequestInterception(true);
-    page.on('request', (req) => req.continue());
-    page.on('response', async (response) => {
-      const ct = response.headers()['content-type'] || '';
-      const rUrl = response.url();
-      if (ct.startsWith('video/') || /\.(mp4|webm|m3u8|ts)(\?|$)/i.test(rUrl)) {
-        videoUrls.add(rUrl);
+    const html = response.data;
+
+    // Look for video URLs
+    const patterns = [
+      /"playable_url"\s*:\s*"([^"]+)"/,
+      /"browser_native_hd_url"\s*:\s*"([^"]+)"/,
+      /"browser_native_sd_url"\s*:\s*"([^"]+)"/,
+      /"hd_src"\s*:\s*"([^"]+)"/,
+      /"sd_src"\s*:\s*"([^"]+)"/,
+      /<meta[^>]+property=["']og:video["'][^>]+content=["']([^"']+)["']/i,
+      /"video_url"\s*:\s*"([^"]+)"/,
+    ];
+
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match) {
+        let videoUrl = match[1].replace(/\\u003d/g, '=').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+        return res.json({ video: videoUrl });
       }
-    });
+    }
 
-    await navigateAndWait(page, url, parseInt(req.query.waitFor) || 8000);
-
-    const domVideo = await page.evaluate(() => {
-      const v = document.querySelector('video[src]');
-      if (v && v.src && v.src.startsWith('http')) return v.src;
-      const source = document.querySelector('video source[src]');
-      if (source && source.src && source.src.startsWith('http')) return source.src;
-      const ogVideo = document.querySelector('meta[property="og:video"]') || document.querySelector('meta[property="og:video:url"]');
-      if (ogVideo && ogVideo.content) return ogVideo.content;
-      return null;
-    });
-
-    const allVideos = [...new Set([...videoUrls, ...(domVideo ? [domVideo] : [])])];
-    
-    await page.close().catch(() => {});
-    res.json({ video: allVideos.length > 0 ? allVideos[0] : null });
-
-  } catch {
     res.json({ video: null });
-  } finally {
-    if (page) await page.close().catch(() => {});
+
+  } catch (err) {
+    console.error('Video detection error:', err.message);
+    res.json({ video: null });
   }
 });
 
 /* ══════════════════════════════════════════════════════════
    ENDPOINT: GET /health
    ══════════════════════════════════════════════════════════ */
-app.get('/health', async (req, res) => {
-  const status = {
+app.get('/health', (req, res) => {
+  res.json({
     status: 'ok',
     uptime: process.uptime(),
     timestamp: Date.now(),
-    version: 'v7-mobile-viewport',
-    browser: browser ? (browser.isConnected() ? 'connected' : 'disconnected') : 'not_initialized',
-    viewport: '375x812 (iPhone)',
-  };
-  if (status.browser !== 'connected') {
-    try { await getBrowser(); status.browser = 'reconnected'; }
-    catch (err) { status.browser = 'error: ' + err.message; status.status = 'degraded'; }
-  }
-  res.json(status);
+    version: 'v8-no-puppeteer',
+  });
 });
 
-process.on('SIGINT', async () => {
-  console.log('Shutting down...');
-  if (browser) await browser.close().catch(() => {});
-  process.exit(0);
-});
-process.on('SIGTERM', async () => {
-  console.log('Shutting down...');
-  if (browser) await browser.close().catch(() => {});
-  process.exit(0);
-});
+/* ══════════════════════════════════════════════════════════
+   HELPER: serveImage
+   Fetches an image from URL and returns it through the API
+   ══════════════════════════════════════════════════════════ */
+async function serveImage(res, imgUrl) {
+  try {
+    const imgResponse = await axios.get(imgUrl, {
+      timeout: 15000,
+      httpAgent,
+      httpsAgent,
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+        'Referer': 'https://www.facebook.com/',
+      },
+      maxRedirects: 5,
+    });
+
+    const contentType = imgResponse.headers['content-type'] || 'image/jpeg';
+    res.set({
+      'Content-Type': contentType,
+      'Cache-Control': 'public, max-age=86400',
+      'Content-Length': imgResponse.data.length,
+    });
+    res.send(imgResponse.data);
+
+  } catch (err) {
+    console.error('Failed to fetch image:', err.message);
+    res.status(502).json({ status: 'error', message: 'Failed to fetch image: ' + err.message });
+  }
+}
 
 app.listen(parseInt(process.env.PORT || '3000', 10), '0.0.0.0', () => {
-  console.log('AdSpy Media API v7 running (iPhone viewport)');
-  console.log('GET /screenshot?url=...  (375x812 screenshot)');
-  console.log('GET /api/video?url=...   (extracts video)');
+  console.log('AdSpy Media API v8 running (no Puppeteer)');
+  console.log('GET /screenshot?url=...  (returns ad image)');
+  console.log('GET /api/video?url=...   (extracts video URL)');
   console.log('GET /health');
 });
