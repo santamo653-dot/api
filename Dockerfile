@@ -1,6 +1,6 @@
-FROM node:20-bullseye-slim
+FROM python:3.11-slim-bullseye
 
-# Install Chromium and dependencies for Puppeteer
+# Install system dependencies for Playwright/Chromium
 RUN apt-get update && apt-get install -y \
     chromium \
     chromium-sandbox \
@@ -11,28 +11,42 @@ RUN apt-get update && apt-get install -y \
     fonts-freefont-ttf \
     libxss1 \
     libxshmfence1 \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libdbus-1-3 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libasound2 \
     --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Tell Playwright where to find browsers and sandbox settings
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_CHROMIUM_SANDBOX=1
+
 # Create app directory
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && playwright install --with-deps chromium
 
-# Install npm dependencies
-RUN npm install --omit=dev
+# Copy application files
+COPY index.py .
+COPY index.js ./fallback.js
 
-# Copy the rest of the application
-COPY . .
-
-# Set Puppeteer environment variables to use the system Chromium
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-
-# Expose the port
+# Expose port
 EXPOSE 3000
 
-# Start the app
-CMD ["node", "index.js"]
+# Run with Gunicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:3000", "--timeout", "120", "index:app"]
